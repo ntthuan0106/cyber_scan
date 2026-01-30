@@ -1,0 +1,43 @@
+services:
+
+### APPLICATION PART
+
+  postgresdb:
+    image: ${POSTGRES_IMAGE}
+    networks:
+      - todonet
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_USER=matthias
+      - POSTGRES_DB=mydb
+
+  todobackend-springboot:
+    image: ntthuan0106job/backend:v1
+    networks:
+      - todonet
+    build:
+      context: ./todobackend-springboot
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+    depends_on:
+      - postgresdb
+
+  todoui-flask:
+    image: ntthuan0106job/frontend:v1
+    build:
+      context: ./todoui-flask
+    networks:
+      - todonet
+    ports:
+      - "5001:5000"
+    environment:
+      - BACKEND_URL=http://todobackend-springboot:8080/todos/
+
+networks:
+  todonet:
