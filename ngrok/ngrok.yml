@@ -1,0 +1,6 @@
+version: 3
+endpoints:
+  - name: jenkins
+    url: https://lively-literate-lark.ngrok-free.app
+    upstream:
+      url: jenkins:8080
