@@ -1,0 +1,302 @@
+pipeline {
+  agent any
+
+  environment {
+    SONARQUBE_HOST='http://sonarqube:9000'
+    SONARQUBE_TOKEN=credentials('sonarqube')
+    
+    DOCKER_USERNAME=credentials('DOCKER_USERNAME')
+    DOCKER_PASSWORD=credentials('DOCKER_PASSWORD')
+
+    DOCKER_REGISTRY = "ntthuan0106job"
+    TAG = 'v1' // Docker image tag
+
+    JAVA_REPORT_FILE='sq_java_report.json'
+    PYTHON_REPORT_FILE='sq_python_report.json'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        git branch: 'main', url: 'https://github.com/ntthuan0106/cyber_scan.git'
+      }
+    }
+
+    stage('SAST Scans') {
+      parallel {
+        stage('Java SAST') {
+          stages {
+            stage('Java Scan (SonarQube)') {
+              agent {
+                  docker {
+                  image 'maven:3-eclipse-temurin-21'
+                  args '-v /root/.m2:/root/.m2'
+                  reuseNode true
+                  }
+              }
+              steps {
+                dir('todo-app/todobackend-springboot') {
+                  withSonarQubeEnv('sonarqube2') {
+                    sh '''
+                      mvn clean verify sonar:sonar \
+                          -DskipTests \
+                          -Dsonar.projectKey=todobackend-java \
+                          -Dsonar.projectName=todobackend-java \
+                          -Dsonar.java.source=17
+                    '''
+                  }
+                }
+              }
+            }
+
+            stage('Java Sonar Summary') {
+              steps {
+                sh '''
+                  echo "=== Java Severity Summary ==="
+                  curl -s -u $SONARQUBE_TOKEN: \
+                    "$SONARQUBE_HOST/api/issues/search?componentKeys=todobackend-java&ps=1&facets=severities" \
+                    -o $JAVA_REPORT_FILE
+
+                  jq -r '
+                    (.facets[]? | select(.property=="severities") | .values // []) as $sev
+                    |
+                    ([
+                      ["MAJOR","MINOR","CRITICAL","INFO","BLOCKER"][] as $s
+                      |
+                      "\\($s): \\(
+                        ($sev[]? | select(.val==$s) | .count) // 0
+                      )"
+                    ] | join("\n"))
+                    +
+                    "\n\n"
+                    +
+                    (
+                      def rank(s):
+                        if s=="HIGH" then 3
+                        elif s=="MEDIUM" then 2
+                        elif s=="LOW" then 1
+                        else 0 end;
+
+                      def max_sev(arr):
+                        (arr | map({s: ., r: rank(.)}) | max_by(.r).s) // "NONE";
+
+                      "SECURITY: \\(
+                          max_sev(
+                            [.issues[].impacts[]? 
+                              | select(.softwareQuality=="SECURITY") 
+                              | .severity]
+                          )
+                      )\n" +
+                      "MAINTAINABILITY: \\(
+                          max_sev(
+                            [.issues[].impacts[]? 
+                              | select(.softwareQuality=="MAINTAINABILITY") 
+                              | .severity]
+                          )
+                      )\n" +
+                      "RELIABILITY: \\(
+                          max_sev(
+                            [.issues[].impacts[]? 
+                              | select(.softwareQuality=="RELIABILITY") 
+                              | .severity]
+                          )
+                      )"
+                    )
+                  ' $JAVA_REPORT_FILE
+                '''
+              }
+            }
+
+            stage("Java Quality Gate") {
+              steps {
+                timeout(time: 1, unit: 'HOURS') {
+                  waitForQualityGate abortPipeline: true
+                }
+              }
+            }
+          }
+        }
+
+        stage('Python SAST') {
+          stages {
+            stage('Python Scan (SonarQube)') {
+              agent {
+                docker {
+                  image 'sonarsource/sonar-scanner-cli:latest'
+                  reuseNode true
+                }
+              }
+              steps {
+                  dir('todo-app/todoui-flask') {
+                      withSonarQubeEnv('sonarqube2') {
+                          sh '''
+                              sonar-scanner \
+                                  -Dsonar.projectKey=todoui-python \
+                                  -Dsonar.projectName=todoui-python \
+                                  -Dsonar.sources=.
+                          '''
+                      }
+                  }
+              }
+            }
+
+            stage('Python Sonar Summary') {
+              steps {
+                sh '''
+                  echo "=== Python Severity Summary ==="
+                  curl -s -u $SONARQUBE_TOKEN: \
+                    "$SONARQUBE_HOST/api/issues/search?componentKeys=todoui-python&ps=1&facets=severities" \
+                    -o $PYTHON_REPORT_FILE
+
+                  jq -r '
+                  (.facets[]? | select(.property=="severities") | .values // []) as $sev
+                  |
+                  ([
+                    ["MAJOR","MINOR","CRITICAL","INFO","BLOCKER"][] as $s
+                    |
+                    "\\($s): \\(
+                      ($sev[]? | select(.val==$s) | .count) // 0
+                    )"
+                  ] | join("\n"))
+                  +
+                  "\n\n"
+                  +
+                  (
+                    def rank(s):
+                      if s=="HIGH" then 3
+                      elif s=="MEDIUM" then 2
+                      elif s=="LOW" then 1
+                      else 0 end;
+
+                    def max_sev(arr):
+                      (arr | map({s: ., r: rank(.)}) | max_by(.r).s) // "NONE";
+
+                    "SECURITY: \\(
+                        max_sev(
+                          [.issues[].impacts[]? 
+                            | select(.softwareQuality=="SECURITY") 
+                            | .severity]
+                        )
+                    )\n" +
+                    "MAINTAINABILITY: \\(
+                        max_sev(
+                          [.issues[].impacts[]? 
+                            | select(.softwareQuality=="MAINTAINABILITY") 
+                            | .severity]
+                        )
+                    )\n" +
+                    "RELIABILITY: \\(
+                        max_sev(
+                          [.issues[].impacts[]? 
+                            | select(.softwareQuality=="RELIABILITY") 
+                            | .severity]
+                        )
+                    )"
+                  )
+                  ' $PYTHON_REPORT_FILE
+                '''
+              }
+            }
+
+              stage("Python Quality Gate") {
+                steps {
+                  timeout(time: 1, unit: 'HOURS') {
+                    waitForQualityGate abortPipeline: true
+                  }
+                }
+              }
+          }
+        }
+
+      }
+    }
+
+    stage('Build and push Docker Images') {
+      stages {
+
+        stage('Build & Scan Images') {
+          parallel {
+
+            stage ('Trivy - Java'){
+              stages {
+                stage('Build Java Backend image') {
+                  steps {
+                    sh '''
+                      docker build -f todo-app/todobackend-springboot/Dockerfile \
+                        -t ${DOCKER_REGISTRY}/backend:${TAG} \
+                        todo-app/todobackend-springboot
+                    '''
+                  }
+                }
+
+                stage('Trivy scan Java'){
+                  steps {
+                    sh '''
+                      # Scan docker image
+                      docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:0.69.0 \
+                        image ${DOCKER_REGISTRY}/backend:${TAG} \
+                        --scanners vuln,misconfig,secret \
+                        -s MEDIUM,HIGH,CRITICAL \
+                        -o trivy-backend-docker-image.md
+                      # Scan Dockerfile
+                      docker run --rm \
+                        -v $(pwd):/work \
+                        aquasec/trivy:0.69.0 \
+                        config /work/todo-app/todobackend-springboot/Dockerfile \
+                        --severity MEDIUM,HIGH,CRITICAL \
+                        -o /work/trivy-backend-dockerfile.md
+                    '''
+                  }
+                }
+              }
+            }
+
+            stage ('Trivy - Python'){
+              stages {
+                stage('Build Python Frontend image') {
+                  steps {
+                    sh '''
+                      docker build -f todo-app/todoui-flask/Dockerfile \
+                        -t ${DOCKER_REGISTRY}/frontend:${TAG} \
+                        todo-app/todoui-flask
+                    '''
+                  }
+                }
+
+                stage('Trivy scan Python'){
+                  steps {
+                    sh '''
+                      docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:0.69.0 \
+                        image ${DOCKER_REGISTRY}/frontend:${TAG} \
+                        --scanners vuln,misconfig,secret \
+                        -s MEDIUM,HIGH,CRITICAL \
+                        -o trivy-frontend.md
+                    '''
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        stage('Push image to Docker Hub') {
+          steps {
+            sh '''
+              echo "$DOCKER_PASSWORD" | docker login \
+                -u "$DOCKER_USERNAME" --password-stdin
+
+              docker push ${DOCKER_REGISTRY}/frontend:${TAG}
+              docker push ${DOCKER_REGISTRY}/backend:${TAG}
+            '''
+          }
+        }
+
+      }
+    }
+
+  }
+}
